@@ -49,10 +49,12 @@ import java.util.UUID
 class MainActivity : ComponentActivity() {
 
     private val prefs by lazy { getSharedPreferences("pulse_ui", MODE_PRIVATE) }
+    private val pipMode = kotlinx.coroutines.flow.MutableStateFlow(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        addOnPictureInPictureModeChangedListener { info -> pipMode.value = info.isInPictureInPictureMode }
         val app = application as PulseApp
         val initialTheme = ThemeMode.valueOf(prefs.getString("theme", "SYSTEM") ?: "SYSTEM")
 
@@ -62,6 +64,7 @@ class MainActivity : ComponentActivity() {
                 AppRoot(
                     app = app,
                     themeMode = themeMode,
+                    pipMode = pipMode,
                     onCycleTheme = {
                         val next = when (themeMode) {
                             ThemeMode.SYSTEM -> ThemeMode.DARK
@@ -90,7 +93,7 @@ private sealed interface Screen {
 }
 
 @Composable
-private fun AppRoot(app: PulseApp, themeMode: ThemeMode, onCycleTheme: () -> Unit) {
+private fun AppRoot(app: PulseApp, themeMode: ThemeMode, pipMode: kotlinx.coroutines.flow.StateFlow<Boolean>, onCycleTheme: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val devices by app.store.devices.collectAsState(initial = emptyList())
@@ -159,6 +162,8 @@ private fun AppRoot(app: PulseApp, themeMode: ThemeMode, onCycleTheme: () -> Uni
         }
         app.resumeActive(ids)
     }
+
+    val pip by pipMode.collectAsState()
 
     fun device(id: String): StoredDevice? = devices.firstOrNull { it.id == id }
     fun conn(id: String): DeviceConnection? = device(id)?.let { app.connectionFor(it) }
@@ -281,7 +286,7 @@ private fun AppRoot(app: PulseApp, themeMode: ThemeMode, onCycleTheme: () -> Uni
                 if (c == null) {
                     stack = listOf(Screen.Devices)
                 } else {
-                    RemoteControlScreen(c, back)
+                    RemoteControlScreen(c, back, pip)
                 }
             }
         }

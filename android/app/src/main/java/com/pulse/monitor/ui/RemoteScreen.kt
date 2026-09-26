@@ -1,40 +1,34 @@
 package com.pulse.monitor.ui
 
+import android.app.PictureInPictureParams
+import android.content.pm.ActivityInfo
 import android.graphics.BitmapFactory
+import android.util.Rational
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.ime
-import androidx.compose.foundation.layout.navigationBars
-import androidx.compose.foundation.layout.union
-import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import java.util.concurrent.TimeUnit
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -42,7 +36,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Icon
@@ -59,41 +52,58 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pulse.monitor.data.connection.DeviceConnection
 import com.pulse.monitor.data.connection.InputChannel
+import com.pulse.monitor.data.connection.LinkState
 import com.pulse.monitor.ui.common.Hairline
 import com.pulse.monitor.ui.common.StateBadge
 import com.pulse.monitor.ui.theme.Label
 import com.pulse.monitor.ui.theme.LocalPulseColors
 import com.pulse.monitor.ui.theme.SmallNumber
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.util.concurrent.TimeUnit
 import kotlin.math.abs
-import kotlin.math.roundToInt
 
-/**
- * 遥控屏：上半 = 触控板手势区，下半 = 文本注入 + 快捷键条。
- * 手势：单指移动/点按左键/双击左键/长按拖拽（按住左键）/双指滑动滚动/双指点按右键。
- */
 @Composable
-fun RemoteControlScreen(connection: DeviceConnection, onBack: () -> Unit) {
+fun RemoteControlScreen(connection: DeviceConnection, onBack: () -> Unit, pip: Boolean) {
     val pulse = LocalPulseColors.current
     val state by connection.state.collectAsState()
     val host = connection.host
     val port = connection.port
     val token = connection.token
+    val context = LocalContext.current
+    val activity = remember { context as? android.app.Activity }
 
-    val channel = remember(host, port, token) {
-        InputChannel(host, port, token)
-    }
+    val channel = remember(host, port, token) { InputChannel(host, port, token) }
+    LaunchedEffect(connection) { if (connection.token != null) connection.start() }
+
     var showScreen by remember { mutableStateOf(false) }
     var frame by remember { mutableStateOf<ImageBitmap?>(null) }
+    var expanded by remember { mutableStateOf(false) }
+    var mirrorButtons by remember { mutableStateOf(false) }
+
+    // JPEG 拉流（PiP 与镜像共用）
     if (showScreen) {
         LaunchedEffect(showScreen, host, port, token) {
             val client = OkHttpClient.Builder().callTimeout(3, TimeUnit.SECONDS).build()
@@ -118,7 +128,34 @@ fun RemoteControlScreen(connection: DeviceConnection, onBack: () -> Unit) {
             }
         }
     }
-    LaunchedEffect(connection) { if (connection.token != null) connection.start() }
+
+    // 隐藏按钮 3 秒自动消失
+    LaunchedEffect(mirrorButtons) {
+        if (mirrorButtons) { delay(3000); mirrorButtons = false }
+    }
+    // 横竖屏跟随放大模式
+    LaunchedEffect(expanded) {
+        activity?.requestedOrientation = if (expanded)
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        else ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+    }
+    fun enterPip() {
+        showScreen = true
+        expanded = false
+        try {
+            activity?.enterPictureInPictureMode(
+                PictureInPictureParams.Builder().setAspectRatio(Rational(16, 9)).build()
+            )
+        } catch (_: Exception) { }
+    }
+
+    // ===== 系统画中画：只渲染镜像 =====
+    if (pip) {
+        Box(Modifier.fillMaxSize().background(Color.Black)) {
+            frame?.let { Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit) }
+        }
+        return
+    }
 
     Column(
         Modifier
@@ -133,11 +170,27 @@ fun RemoteControlScreen(connection: DeviceConnection, onBack: () -> Unit) {
         ) {
             IconButton(onClick = {
                 channel.close()
+                if (expanded) expanded = false
                 onBack()
             }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回", tint = pulse.textPrimary) }
             Column(Modifier.weight(1f)) {
-                Text("遥控", fontSize = 22.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, color = pulse.textPrimary)
+                Text(
+                    if (expanded) "遥控 · 横屏" else "遥控",
+                    fontSize = 22.sp, fontWeight = FontWeight.Bold, color = pulse.textPrimary,
+                )
                 Text("触控板 · 键盘 → ${connection.displayName}", style = SmallNumber, color = pulse.textTertiary)
+            }
+            if (expanded) {
+                Text(
+                    "还原竖屏",
+                    style = Label,
+                    color = pulse.cpu,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { expanded = false }
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                )
+                Spacer(Modifier.width(8.dp))
             }
             Text(
                 if (showScreen) "屏幕 ✓" else "屏幕",
@@ -150,59 +203,73 @@ fun RemoteControlScreen(connection: DeviceConnection, onBack: () -> Unit) {
             )
             Spacer(Modifier.width(4.dp))
             when (state) {
-                com.pulse.monitor.data.connection.LinkState.ONLINE -> StateBadge("在线", pulse.online, true)
-                com.pulse.monitor.data.connection.LinkState.RECONNECTING -> StateBadge("重连中", pulse.loadWarm, true)
-                com.pulse.monitor.data.connection.LinkState.STALE -> StateBadge("数据滞后", pulse.loadWarm)
+                LinkState.ONLINE -> StateBadge("在线", pulse.online, true)
+                LinkState.RECONNECTING -> StateBadge("重连中", pulse.loadWarm, true)
+                LinkState.STALE -> StateBadge("数据滞后", pulse.loadWarm)
                 else -> StateBadge("离线", null)
             }
         }
         Hairline()
 
-        AnimatedVisibility(visible = showScreen) {
-            ScreenPanel(frame)
-        }
-
-        // 触控板手势区
-        Touchpad(
-            channel = channel,
-            connected = state == com.pulse.monitor.data.connection.LinkState.ONLINE,
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-        )
-
-        // 文本注入
-        TextKeyInput(channel, enabled = state == com.pulse.monitor.data.connection.LinkState.ONLINE)
-    }
-}
-
-// ---------- 屏幕镜像面板 ----------
-
-@Composable
-private fun ScreenPanel(frame: ImageBitmap?) {
-    val pulse = LocalPulseColors.current
-    Box(
-        Modifier
-            .fillMaxWidth()
-            .height(240.dp)
-            .background(pulse.surface)
-            .border(1.dp, pulse.hairline, RoundedCornerShape(14.dp))
-    ) {
-        if (frame != null) {
-            Image(frame, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+        if (expanded) {
+            // ===== 横屏放大：左侧大镜像 + 底部透明输入框；右侧小触控板 =====
+            Row(Modifier.fillMaxSize()) {
+                Column(Modifier.weight(1f)) {
+                    MirrorBox(
+                        frame = frame,
+                        buttonsVisible = mirrorButtons,
+                        onToggle = { mirrorButtons = !mirrorButtons },
+                        onPip = { enterPip() },
+                        onExpand = null,
+                        modifier = Modifier.fillMaxWidth().weight(1f),
+                    )
+                    Hairline()
+                    InputBox(
+                        channel, state == LinkState.ONLINE, transparent = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                Column(Modifier.width(230.dp)) {
+                    Touchpad(
+                        channel = channel,
+                        connected = state == LinkState.ONLINE,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            }
         } else {
-            Text(
-                "正在连接电脑屏幕…",
-                style = SmallNumber,
-                color = pulse.textTertiary,
-                modifier = Modifier.align(Alignment.Center),
+            AnimatedVisibility(visible = showScreen) {
+                MirrorBox(
+                    frame = frame,
+                    buttonsVisible = mirrorButtons,
+                    onToggle = { mirrorButtons = !mirrorButtons },
+                    onPip = { enterPip() },
+                    onExpand = { expanded = true },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(240.dp)
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                )
+            }
+
+            Touchpad(
+                channel = channel,
+                connected = state == LinkState.ONLINE,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+            )
+
+            InputBox(
+                channel, state == LinkState.ONLINE, transparent = false,
+                modifier = Modifier.fillMaxWidth(),
             )
         }
     }
 }
 
-// ---------- 触控板 ----------
+// ---------- 屏幕镜像（点画面呼出隐藏按钮，3 秒自动消失） ----------
 
 private class TapState {
     var at = 0L
@@ -211,10 +278,79 @@ private class TapState {
 }
 
 @Composable
+private fun MirrorBox(
+    frame: ImageBitmap?,
+    buttonsVisible: Boolean,
+    onToggle: () -> Unit,
+    onPip: () -> Unit,
+    onExpand: (() -> Unit)?,
+    modifier: Modifier = Modifier,
+) {
+    val pulse = LocalPulseColors.current
+    Box(
+        modifier
+            .clip(RoundedCornerShape(14.dp))
+            .background(pulse.surface)
+            .border(1.dp, pulse.hairline, RoundedCornerShape(14.dp))
+    ) {
+        if (frame != null) {
+            Image(
+                frame, null,
+                Modifier.fillMaxSize().clickable { onToggle() },
+                contentScale = ContentScale.Fit,
+            )
+        } else {
+            Text(
+                "正在连接电脑屏幕…\n（点按此处开启镜像）",
+                style = SmallNumber,
+                color = pulse.textTertiary,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.align(Alignment.Center).clickable { onToggle() },
+            )
+        }
+        if (buttonsVisible) {
+            Text(
+                "画中画",
+                style = Label,
+                color = pulse.textPrimary,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(10.dp)
+                    .clip(RoundedCornerShape(9.dp))
+                    .background(Color.Black.copy(alpha = 0.55f))
+                    .clickable { onPip() }
+                    .padding(horizontal = 12.dp, vertical = 7.dp),
+            )
+            onExpand?.let {
+                Text(
+                    "放大",
+                    style = Label,
+                    color = pulse.textPrimary,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(10.dp)
+                        .clip(RoundedCornerShape(9.dp))
+                        .background(Color.Black.copy(alpha = 0.55f))
+                        .clickable { it() }
+                        .padding(horizontal = 12.dp, vertical = 7.dp),
+                )
+            }
+        }
+    }
+}
+
+// ---------- 触控板 ----------
+
+private class TapState2 {
+    var at = 0L
+    var x = 0f
+    var y = 0f
+}
+
+@Composable
 private fun Touchpad(channel: InputChannel, connected: Boolean, modifier: Modifier = Modifier) {
     val pulse = LocalPulseColors.current
-    // 双击检测状态（跨手势保留）
-    val tapState = remember { TapState() }
+    val tapState = remember { TapState2() }
 
     Box(
         modifier
@@ -244,7 +380,6 @@ private fun Touchpad(channel: InputChannel, connected: Boolean, modifier: Modifi
                         if (pressed.isEmpty()) {
                             if (btnHeld) channel.button(0, false)
                             val elapsed = nowMs - startTime
-                            // 单指快速点按 → 左键（带双击检测）
                             if (!multi && !btnHeld && travel < touchSlop * 2 && elapsed < 240) {
                                 val wall = System.currentTimeMillis()
                                 val isDouble = wall - tapState.at < 350 &&
@@ -255,7 +390,6 @@ private fun Touchpad(channel: InputChannel, connected: Boolean, modifier: Modifi
                                 tapState.y = down.position.y
                                 channel.click(0, isDouble)
                             }
-                            // 双指快速点按 → 右键
                             if (multi && !scrolled && elapsed < 280) {
                                 channel.click(1, false)
                             }
@@ -277,7 +411,6 @@ private fun Touchpad(channel: InputChannel, connected: Boolean, modifier: Modifi
                             val delta = c.positionChange()
                             travel += delta.getDistance()
                             if (!multi) {
-                                // 长按 → 按住左键进入拖拽
                                 if (!btnHeld && travel < touchSlop &&
                                     nowMs - startTime >= longPressMs
                                 ) {
@@ -310,20 +443,23 @@ private fun Touchpad(channel: InputChannel, connected: Boolean, modifier: Modifi
     }
 }
 
-// ---------- 文本注入 + 快捷键 ----------
+// ---------- 文本注入（组词感知 + 最小差异同步） ----------
 
 @Composable
-private fun TextKeyInput(channel: InputChannel, enabled: Boolean) {
+private fun InputBox(
+    channel: InputChannel,
+    enabled: Boolean,
+    transparent: Boolean,
+    modifier: Modifier = Modifier,
+) {
     val pulse = LocalPulseColors.current
     var field by remember { mutableStateOf(TextFieldValue("")) }
     // 已推送到 PC 的「已提交文本」镜像；组词中的内容不参与同步
     var sent by remember { mutableStateOf("") }
 
     fun syncCommitted(v: TextFieldValue) {
-        // 组词区间之外的部分 = 已真正落进字段的文本
         val compEnd = v.composition?.min ?: v.text.length
         val committed = v.text.substring(0, compEnd)
-        // 最小差异：只删/发真正变化的尾巴（容忍 IME 对句中任意位置的改写）
         var i = 0
         val n = minOf(sent.length, committed.length)
         while (i < n && sent[i] == committed[i]) i++
@@ -332,24 +468,55 @@ private fun TextKeyInput(channel: InputChannel, enabled: Boolean) {
         sent = committed
     }
 
-    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 10.dp)) {
-        OutlinedTextField(
-            value = field,
-            onValueChange = { v ->
-                if (enabled) syncCommitted(v)
-                field = v
-            },
-            enabled = enabled,
-            modifier = Modifier.fillMaxWidth(),
-            placeholder = { Text(if (enabled) "在此输入，文字将直接打到电脑上…" else "电脑离线，连接后可用", style = SmallNumber, color = pulse.textTertiary) },
-            singleLine = true,
-            textStyle = androidx.compose.ui.text.TextStyle(color = pulse.textPrimary, fontSize = 15.sp),
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-            keyboardActions = KeyboardActions(onSend = { channel.key("enter") }),
-            shape = RoundedCornerShape(12.dp),
-        )
-        Spacer(Modifier.height(8.dp))
-        KeyStrip(channel, enabled)
+    if (transparent) {
+        Box(modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
+            if (field.text.isEmpty()) {
+                Text(
+                    "点此输入 → 文字直达电脑…",
+                    style = SmallNumber,
+                    color = pulse.textTertiary,
+                    modifier = Modifier.align(Alignment.CenterStart).padding(start = 16.dp),
+                )
+            }
+            BasicTextField(
+                value = field,
+                onValueChange = { v ->
+                    if (enabled) syncCommitted(v)
+                    field = v
+                },
+                enabled = enabled,
+                singleLine = true,
+                textStyle = TextStyle(color = pulse.textPrimary.copy(alpha = 0.9f), fontSize = 15.sp),
+                cursorBrush = SolidColor(pulse.cpu),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                keyboardActions = KeyboardActions(onSend = { channel.key("enter") }),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color.Black.copy(alpha = 0.35f))
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+            )
+        }
+    } else {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 10.dp)) {
+            OutlinedTextField(
+                value = field,
+                onValueChange = { v ->
+                    if (enabled) syncCommitted(v)
+                    field = v
+                },
+                enabled = enabled,
+                modifier = Modifier.fillMaxWidth(),
+                placeholder = { Text(if (enabled) "在此输入，文字将直接打到电脑上…" else "电脑离线，连接后可用", style = SmallNumber, color = pulse.textTertiary) },
+                singleLine = true,
+                textStyle = TextStyle(color = pulse.textPrimary, fontSize = 15.sp),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                keyboardActions = KeyboardActions(onSend = { channel.key("enter") }),
+                shape = RoundedCornerShape(12.dp),
+            )
+            Spacer(Modifier.height(8.dp))
+            KeyStrip(channel, enabled)
+        }
     }
 }
 

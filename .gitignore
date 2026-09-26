@@ -12,3 +12,5 @@ dist/logs/
 # 测试数据与日志
 tools/soak/
 *.log
+# 本地验证截图（含隐私，不入库）
+tools/shots/
